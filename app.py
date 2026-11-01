@@ -297,12 +297,26 @@ def page_dashboard(tasks: list[dict]) -> None:
         st.button("➕ Add your first task", on_click=go_to, args=("Add New Task",))
         return
 
-    urgent = [
-        t for t in tasks if t["priority"] == "High" and not logic.is_completed(t)
-    ]
-    if urgent:
-        st.subheader("🔴 High-priority tasks to finish")
-        render_task_list(logic.sort_by_due_date(urgent)[:3], "dash_high", actions=False)
+
+    # Smart task recommendations
+    ranked_tasks = logic.rank_tasks_by_smart_priority(tasks)
+
+    if ranked_tasks:
+        st.subheader("🧠 Smart Recommended Tasks")
+        st.caption("Tasks ranked using priority and deadline urgency.")
+
+        for item in ranked_tasks[:5]:
+            task = item["task"]
+
+            with st.container(border=True):
+                st.markdown(f"**{md_safe(task['title'])}**")
+                render_badges(task)
+
+                st.caption(
+                    f"Smart Priority Score: {item['score']} / 100"
+                )
+                st.info(f"Reason: {item['reason']}")
+
 
     st.subheader("🕒 Recent tasks")
     recent = sorted(tasks, key=lambda t: t["task_id"], reverse=True)[:5]

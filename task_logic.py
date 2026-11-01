@@ -216,3 +216,91 @@ def group_by_deadline(
         else:
             groups["later"].append(task)
     return {name: sort_by_due_date(items) for name, items in groups.items()}
+
+# --------------------------------------------------------------------------
+# Smart task prioritisation
+# --------------------------------------------------------------------------
+
+PRIORITY_SCORES = {
+    "High": 50,
+    "Medium": 30,
+    "Low": 10,
+}
+
+
+def calculate_smart_score(
+    task: Task, today: date | None = None
+) -> int:
+    """Calculate a transparent urgency score for an incomplete task.
+
+    Higher scores indicate tasks that should be considered first.
+    """
+    if is_completed(task):
+        return 0
+
+    score = PRIORITY_SCORES.get(str(task.get("priority")), 0)
+    days_left = days_until_due(task, today)
+
+    if days_left is None:
+        return score
+
+    if days_left < 0:
+        score += 50  # Overdue
+    elif days_left == 0:
+        score += 40  # Due today
+    elif days_left <= 3:
+        score += 30  # Due within three days
+    elif days_left <= 7:
+        score += 20  # Due within a week
+
+    return score
+
+
+def rank_tasks_by_smart_priority(
+    tasks: Iterable[Task], today: date | None = None
+) -> list[dict]:
+    """Return incomplete tasks ranked by smart priority score.
+
+    Original task dictionaries are not modified.
+    """
+    ranked = []
+
+    for task in tasks:
+        if is_completed(task):
+            continue
+
+        score = calculate_smart_score(task, today)
+
+        ranked.append({
+            "task": task,
+            "score": score,
+            "reason": _smart_priority_reason(task, today),
+        })
+
+    return sorted(
+        ranked,
+        key=lambda item: (
+            -item["score"],
+            days_until_due(item["task"], today)
+            if days_until_due(item["task"], today) is not None
+            else float("inf"),
+        ),
+    )
+
+
+def _smart_priority_reason(
+    task: Task, today: date | None = None
+) -> str:
+    """Explain why a task received its ranking."""
+    days_left = days_until_due(task, today)
+    priority = task.get("priority", "Unknown")
+
+    if days_left is not None and days_left < 0:
+        return f"Overdue by {-days_left} day(s)"
+    if days_left == 0:
+        return "Due today"
+    if days_left is not None and days_left <= 3:
+        return f"Due in {days_left} day(s)"
+    if days_left is not None and days_left <= 7:
+        return f"Due within a week; {priority} priority"
+    return f"{priority} priority"
