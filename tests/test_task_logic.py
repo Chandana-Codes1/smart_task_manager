@@ -228,3 +228,45 @@ def test_group_by_deadline_ignores_completed_and_splits_rest(sample_tasks):
 def test_group_by_deadline_finds_overdue():
     groups = logic.group_by_deadline([make_task(due="2026-10-20")], TODAY)
     assert len(groups["overdue"]) == 1
+
+
+
+# ------------------------------------------------------ smart prioritisation
+
+def test_smart_score_rewards_high_priority():
+    task = make_task(priority="High", due=None)
+    assert logic.calculate_smart_score(task, TODAY) == 50
+
+
+def test_smart_score_rewards_urgent_deadline():
+    task = make_task(priority="Medium", due="2026-10-31")
+    assert logic.calculate_smart_score(task, TODAY) == 70
+
+
+def test_smart_score_rewards_overdue_tasks():
+    task = make_task(priority="High", due="2026-10-30")
+    assert logic.calculate_smart_score(task, TODAY) == 100
+
+
+def test_completed_tasks_are_excluded_from_ranking():
+    tasks = [
+        make_task("Active task", "High", "Pending", "2026-11-05", 1),
+        make_task("Finished task", "High", "Completed", "2026-10-30", 2),
+    ]
+
+    ranked = logic.rank_tasks_by_smart_priority(tasks, TODAY)
+
+    assert len(ranked) == 1
+    assert ranked[0]["task"]["task_id"] == 1
+
+
+def test_smart_ranking_places_overdue_task_first():
+    tasks = [
+        make_task("Future task", "High", "Pending", "2026-11-10", 1),
+        make_task("Overdue task", "Low", "Pending", "2026-10-30", 2),
+    ]
+
+    ranked = logic.rank_tasks_by_smart_priority(tasks, TODAY)
+
+    assert ranked[0]["task"]["task_id"] == 2
+    assert ranked[0]["reason"] == "Overdue by 1 day(s)"
