@@ -11,11 +11,16 @@ from datetime import date
 
 import streamlit as st
 
+import collab_db
+import collab_ui
+import dashboard_html
+import dashboard_ui
 import database as db
 import task_logic as logic
 
 st.set_page_config(page_title="Smart Task Manager", page_icon="✅", layout="wide")
 db.init_db()  # safe on every run: creates the table only if it is missing
+collab_db.init_collab_db()  # Collaborative Planning tables (never touches existing data)
 
 PAGES = [
     "Dashboard",
@@ -23,6 +28,7 @@ PAGES = [
     "All Tasks",
     "Upcoming & Overdue",
     "Completed Tasks",
+    *collab_ui.COLLAB_PAGES,  # Collaborative Planning pages
 ]
 PAGE_ICONS = {
     "Dashboard": "📊",
@@ -30,6 +36,7 @@ PAGE_ICONS = {
     "All Tasks": "📋",
     "Upcoming & Overdue": "⏰",
     "Completed Tasks": "✅",
+    **collab_ui.COLLAB_ICONS,
 }
 
 PRIORITY_BADGE = {
@@ -99,6 +106,14 @@ def stop_edit() -> None:
 def ask_delete(task_id: int) -> None:
     st.session_state["confirm_delete_id"] = task_id
     st.session_state.pop("editing_id", None)
+
+
+def toggle_share(task_id: int) -> None:
+    """Open or close the share panel of a task."""
+    if st.session_state.get("sharing_id") == task_id:
+        st.session_state.pop("sharing_id", None)
+    else:
+        st.session_state["sharing_id"] = task_id
 
 
 def cancel_delete() -> None:
@@ -199,6 +214,10 @@ def render_task_card(task: dict, section: str, actions: bool = True) -> None:
         render_badges(task)
         if task.get("description"):
             st.caption(md_safe(task["description"]))
+        if task.get("shared_by"):
+            st.caption(f"🤝 Shared with you by **{md_safe(task['shared_by'])}**")
+        elif task.get("shared_with"):
+            st.caption("🤝 Shared with " + ", ".join(md_safe(n) for n in task["shared_with"]))
 
         if not actions:
             return
@@ -222,7 +241,8 @@ def render_task_card(task: dict, section: str, actions: bool = True) -> None:
             )
             return
 
-        cols = st.columns([1, 1, 1, 1, 2])
+        is_owner = not task.get("shared_by")  # shared-with-me tasks: status only
+        cols = st.columns([1, 1, 1, 1, 1, 1])
         slot = 0
         if task["status"] == "Pending":
             cols[slot].button(
@@ -249,20 +269,30 @@ def render_task_card(task: dict, section: str, actions: bool = True) -> None:
                 args=(task_id, "Pending"),
                 use_container_width=True,
             )
-        cols[2].button(
-            "✏️ Edit",
-            key=f"{section}_edit_{task_id}",
-            on_click=start_edit,
-            args=(task_id,),
-            use_container_width=True,
-        )
-        cols[3].button(
-            "🗑 Delete",
-            key=f"{section}_delete_{task_id}",
-            on_click=ask_delete,
-            args=(task_id,),
-            use_container_width=True,
-        )
+        if is_owner:
+            cols[2].button(
+                "✏️ Edit",
+                key=f"{section}_edit_{task_id}",
+                on_click=start_edit,
+                args=(task_id,),
+                use_container_width=True,
+            )
+            cols[3].button(
+                "🗑 Delete",
+                key=f"{section}_delete_{task_id}",
+                on_click=ask_delete,
+                args=(task_id,),
+                use_container_width=True,
+            )
+            cols[4].button(
+                "🤝 Share",
+                key=f"{section}_share_{task_id}",
+                on_click=toggle_share,
+                args=(task_id,),
+                use_container_width=True,
+            )
+        if is_owner and st.session_state.get("sharing_id") == task_id:
+            collab_ui.render_share_panel(task_id, section)
 
 
 def render_task_list(tasks: list[dict], section: str, actions: bool = True) -> None:
@@ -297,26 +327,12 @@ def page_dashboard(tasks: list[dict]) -> None:
         st.button("➕ Add your first task", on_click=go_to, args=("Add New Task",))
         return
 
-
-    # Smart task recommendations
-    ranked_tasks = logic.rank_tasks_by_smart_priority(tasks)
-
-    if ranked_tasks:
-        st.subheader("🧠 Smart Recommended Tasks")
-        st.caption("Tasks ranked using priority and deadline urgency.")
-
-        for item in ranked_tasks[:5]:
-            task = item["task"]
-
-            with st.container(border=True):
-                st.markdown(f"**{md_safe(task['title'])}**")
-                render_badges(task)
-
-                st.caption(
-                    f"Smart Priority Score: {item['score']} / 100"
-                )
-                st.info(f"Reason: {item['reason']}")
-
+    urgent = [
+        t for t in tasks if t["priority"] == "High" and not logic.is_completed(t)
+    ]
+    if urgent:
+        st.subheader("🔴 High-priority tasks to finish")
+        render_task_list(logic.sort_by_due_date(urgent)[:3], "dash_high", actions=False)
 
     st.subheader("🕒 Recent tasks")
     recent = sorted(tasks, key=lambda t: t["task_id"], reverse=True)[:5]
@@ -326,6 +342,13 @@ def page_dashboard(tasks: list[dict]) -> None:
 def page_add_task() -> None:
     st.header("➕ Add New Task")
     version = st.session_state.get("add_form_version", 0)  # new number = blank form
+
+    last_id = st.session_state.get("last_added_id")
+    if last_id:  # offer to share the task that was just created
+        with st.container(border=True):
+            collab_ui.render_share_panel(last_id, "add")
+            st.button("Done", key="add_share_done",
+                      on_click=lambda: st.session_state.pop("last_added_id", None))
 
     with st.form("add_task_form"):
         title = st.text_input("Title *", key=f"add_title_{version}", max_chars=100)
@@ -355,15 +378,17 @@ def page_add_task() -> None:
             st.error(message)
         return
     try:
-        db.add_task(
-            title, description, category, priority, "Pending", due.isoformat()
+        new_id = db.add_task(
+            title, description, category, priority, "Pending", due.isoformat(),
+            owner_id=collab_ui.current_user()["user_id"],
         )
     except (ValueError, sqlite3.Error) as error:
         st.error(f"Could not save the task: {error}")
         return
 
     st.session_state["add_form_version"] = version + 1
-    flash(f"Task “{title.strip()}” added.")
+    st.session_state["last_added_id"] = new_id
+    flash(f"Task “{title.strip()}” added. You can share it below.")
     st.rerun()
 
 
@@ -430,36 +455,47 @@ def page_completed(tasks: list[dict]) -> None:
 # Main
 # --------------------------------------------------------------------------
 def main() -> None:
-    tasks = db.get_all_tasks()
+    dashboard_ui.inject_theme()  # dark purple theme for every page
+    user = collab_ui.current_user()
+    if user is None:  # not logged in: the login screen is the first thing shown
+        show_flash()
+        collab_ui.page_auth()
+        return
+
+    tasks = collab_db.get_user_tasks(user["user_id"])  # my tasks + tasks shared with me
     stats = logic.calculate_stats(tasks)
 
     with st.sidebar:
-        st.title("✅ Smart Task Manager")
-        st.radio(
-            "Navigation",
-            PAGES,
-            key="page",
-            format_func=lambda name: f"{PAGE_ICONS[name]}  {name}",
-            label_visibility="collapsed",
+        st.markdown(dashboard_html.brand_html(), unsafe_allow_html=True)
+        dashboard_ui.render_nav(
+            PAGES, PAGE_ICONS,
+            badges={"Invitations": collab_db.count_pending_requests(user["user_id"])},
         )
         st.divider()
         st.caption(
             f"{stats['total']} tasks · {stats['completed']} done · "
             f"{stats['overdue']} overdue"
         )
+        collab_ui.render_sidebar_account()
 
     show_flash()
     page = st.session_state["page"]
     if page == "Dashboard":
-        page_dashboard(tasks)
+        dashboard_ui.render_dashboard(tasks)  # new interactive dashboard
     elif page == "Add New Task":
         page_add_task()
     elif page == "All Tasks":
         page_all_tasks(tasks)
     elif page == "Upcoming & Overdue":
         page_upcoming(tasks)
-    else:
+    elif page == "Completed Tasks":
         page_completed(tasks)
+    elif page == "People":
+        collab_ui.page_people()
+    elif page == "Collaborative Plans":
+        collab_ui.page_plans()
+    else:
+        collab_ui.page_invitations()
 
 
 if "page" not in st.session_state:

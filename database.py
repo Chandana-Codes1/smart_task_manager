@@ -38,6 +38,19 @@ def init_db(db_path: str | Path = DB_PATH) -> None:
                 )
                 """
             )
+            _add_plan_columns(connection)
+
+
+def _add_plan_columns(connection: sqlite3.Connection) -> None:
+    """Collaborative Planning: link a task to a plan (non-destructive migration).
+
+    Adds three NULLABLE columns to an existing tasks table. Existing rows keep
+    NULL in all of them, which means "personal task" - exactly as before.
+    """
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+    for column in ("plan_id", "assigned_to", "created_by"):
+        if column not in existing:
+            connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} INTEGER")
 
 
 def _check_fields(title: str, priority: str, status: str, due_date: str | None) -> None:
@@ -65,8 +78,13 @@ def add_task(
     status: str = "Pending",
     due_date: str | None = None,
     db_path: str | Path = DB_PATH,
+    owner_id: int | None = None,
 ) -> int:
-    """Insert a task and return its generated task_id."""
+    """Insert a task and return its generated task_id.
+
+    owner_id (optional) is the logged-in user who owns the task; leave it out
+    and the task is created exactly as before.
+    """
     _check_fields(title, priority, status, due_date)
 
     created_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -75,8 +93,9 @@ def add_task(
             cursor = connection.execute(
                 """
                 INSERT INTO tasks (
-                    title, description, category, priority, status, due_date, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    title, description, category, priority, status, due_date, created_at,
+                    created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     title.strip(),
@@ -86,16 +105,23 @@ def add_task(
                     status,
                     due_date,
                     created_at,
+                    owner_id,
                 ),
             )
             return cursor.lastrowid
 
 
 def get_all_tasks(db_path: str | Path = DB_PATH) -> list[dict]:
-    """Return every task as a dict, oldest first."""
+    """Return every personal task as a dict, oldest first.
+
+    Tasks that belong to a collaborative plan (plan_id set) are not personal
+    tasks, so they are excluded here and shown on the Collaborative Plans page.
+    """
     with closing(sqlite3.connect(db_path)) as connection:
         connection.row_factory = sqlite3.Row  # rows behave like dicts
-        rows = connection.execute("SELECT * FROM tasks ORDER BY task_id").fetchall()
+        rows = connection.execute(
+            "SELECT * FROM tasks WHERE plan_id IS NULL ORDER BY task_id"
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
